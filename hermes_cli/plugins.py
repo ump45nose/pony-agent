@@ -7,10 +7,10 @@ Discovers, loads, and manages plugins from four sources:
 1. **Bundled plugins** – ``<repo>/plugins/<name>/`` (shipped with hermes-agent;
    ``memory/`` and ``context_engine/`` subdirs are excluded — they have their
    own discovery paths)
-2. **User plugins**   – ``~/.hermes/plugins/<name>/``
-3. **Project plugins** – ``./.hermes/plugins/<name>/`` (opt-in via
-   ``HERMES_ENABLE_PROJECT_PLUGINS``)
-4. **Pip plugins**     – packages that expose the ``hermes_agent.plugins``
+2. **User plugins**   – ``~/.pony/plugins/<name>/``
+3. **Project plugins** – ``./.pony/plugins/<name>/`` (opt-in via
+   ``PONY_ENABLE_PROJECT_PLUGINS``)
+4. **Pip plugins**     – packages that expose the ``pony_agent.plugins``
    entry-point group.
 
 Later sources override earlier ones on name collision, so a user or project
@@ -214,7 +214,7 @@ VALID_HOOKS: Set[str] = {
     "kanban_task_blocked",
 }
 
-ENTRY_POINTS_GROUP = "hermes_agent.plugins"
+ENTRY_POINTS_GROUP = "pony_agent.plugins"
 
 _NS_PARENT = "hermes_plugins"
 
@@ -1374,7 +1374,7 @@ class PluginManager:
 
         # 3. Project plugins (./.hermes/plugins/)
         if _env_enabled("HERMES_ENABLE_PROJECT_PLUGINS"):
-            project_dir = Path.cwd() / ".hermes" / "plugins"
+            project_dir = Path.cwd() / ".pony" / "plugins"
             logger.debug("Scanning project plugins: %s", project_dir)
             project_manifests = self._scan_directory(project_dir, source="project")
             logger.debug("  project: %d manifest(s)", len(project_manifests))

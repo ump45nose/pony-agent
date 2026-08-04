@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from utils import atomic_replace, fast_safe_load
 
 
@@ -173,6 +173,23 @@ def _sanitize_loaded_credentials() -> None:
 
 
 def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
+    if os.environ.get("PONY_BOOTSTRAPPED") == "1":
+        try:
+            values = dotenv_values(path, encoding="utf-8")
+        except UnicodeDecodeError:
+            values = dotenv_values(path, encoding="latin-1")
+        for key, value in values.items():
+            if not key or value is None or key.startswith("HERMES_"):
+                continue
+            target = key
+            if key.startswith("PONY_"):
+                os.environ[key] = value if override or key not in os.environ else os.environ[key]
+                if key not in {"PONY_AGENT_CORE", "PONY_BOOTSTRAPPED"}:
+                    target = "HERMES_" + key.removeprefix("PONY_")
+            if override or target not in os.environ:
+                os.environ[target] = value
+        _sanitize_loaded_credentials()
+        return
     try:
         load_dotenv(dotenv_path=path, override=override, encoding="utf-8")
     except UnicodeDecodeError:

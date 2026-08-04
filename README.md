@@ -1,195 +1,134 @@
-# Hermes Agent
+# Pony Agent
 
-Hermes 是一个可以长期运行、跨入口工作的个人 AI Agent。它把模型调用、工具、
-Skill、记忆、自动化和消息网关放进同一个 Agent Core：你可以在终端里使用它，
-也可以让它在服务器上运行，再从消息平台或桌面端继续同一条工作流。
+Pony Agent 是从 Hermes Agent 演进而来的轻量 Agent Kernel。它保留 Hermes 在
+provider、工具、审批、Profile、消息网关和 MCP 等外围积累的实现，重新建立一个
+小型、可测试、async-first 的消息与工具循环。
 
-| 入口 | 适合场景 |
-| --- | --- |
-| CLI / TUI | 交互式开发、运维和研究 |
-| Dashboard / Desktop | 浏览器或桌面端的可视化对话 |
-| Gateway | Telegram、Discord、Slack、WhatsApp、Signal 等消息平台 |
-| ACP | 把 Hermes 接入 VS Code、Zed 或 JetBrains |
+当前版本是 `0.1.0a1`。CLI oneshot 已默认使用 Pony Kernel；交互式 CLI、Gateway、
+Bedrock、ACP 和 Codex App Server 仍暂时运行 legacy loop。
 
-- **当前版本：** `0.19.1`
-- **官方文档：** <https://hermes-agent.nousresearch.com/docs/>
-- **上游仓库：** <https://github.com/NousResearch/hermes-agent>
-- **本地定制仓库：** <https://github.com/ump45nose/hermes-agent>
+- **仓库：** <https://github.com/ump45nose/pony-agent>
+- **上游项目：** <https://github.com/NousResearch/hermes-agent>
 - **许可证：** MIT，见 [LICENSE](LICENSE)
 
-## 你可以用 Hermes 做什么？
+## 为什么是一个新 Kernel？
 
-- **多入口共用一个 Agent Core：** CLI、TUI、Dashboard、Desktop 和 Gateway 不各自维护一套聊天逻辑。
-- **把能力放在边缘：** Toolset、Skill、插件和 MCP 可以扩展工具，而不必不断扩大核心工具 schema。
-- **按 Profile 隔离：** 配置、凭据、会话、记忆、Skill、MCP OAuth 和网关状态可以按身份或工作空间分开。
-- **记忆与学习闭环：** Episode 检索、脱敏记忆和 Skill 候选都有明确来源与边界，可以审核、回滚。
-- **自动化与协作：** Cron 适合无人值守任务；Kanban 适合有 claim、租约、子任务和交付回执的长任务。
-- **可替换模型与后端：** provider 插件支持 Nous Portal、OpenAI、OpenRouter 和自定义兼容端点。
+一个基础 agent loop 并不需要框架：接收消息、流式请求模型、执行工具，再把工具
+结果交回模型即可。真正昂贵的是 provider 协议差异、reasoning/signature replay、
+缓存与凭据刷新、工具审批、secret scope、Profile、平台重连和 MCP OAuth。
 
-## 运行要求
+Pony 因此采用绞杀式迁移：
 
-- Linux、macOS、WSL2、Termux 或 Windows；Windows 原生安装使用 PowerShell 安装器。
-- Python `>=3.11,<3.14`（项目会拒绝 Python 3.14，以避免部分 Rust 依赖退回源码构建）。
-- 源码开发推荐安装 [uv](https://docs.astral.sh/uv/)。TUI、Desktop、特定 provider 和消息平台会按需需要 Node.js 或额外依赖。
-- 至少准备一个模型 provider 的凭据；密钥只放在 Hermes 的 Secret scope，不要写入 README、Prompt、日志或 Git。
-
-## 2 分钟开始
-
-### 安装发布版
-
-Linux、macOS、WSL2 和 Termux：
-
-```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-source ~/.bashrc  # zsh 使用 source ~/.zshrc
-hermes doctor
-hermes setup
-hermes
+```text
+pony -z
+  -> AgentKernel
+       -> ProviderAdapter  -> Chat / Responses / Anthropic / native Gemini
+       -> ToolRuntime      -> existing registry / ACL / approval / receipts
+       -> ContextPolicy    -> one bounded compaction attempt
+       -> SessionStore     -> ~/.pony/kernel.db
+       -> KernelEvent      -> streaming UI / future Gateway adapter
 ```
 
-Windows 原生 PowerShell：
+纯 kernel 位于 `pony_agent/core/`。它不导入 provider SDK、SQLite、Hermes CLI 或
+具体工具；这些能力均通过窄接口注入。
 
-```powershell
-iex (irm https://hermes-agent.nousresearch.com/install.ps1)
-hermes doctor
-hermes setup
-hermes
-```
+## 从源码运行
 
-安装器会准备 Hermes 运行时需要的 Python、Node 和 Git Bash 等依赖。平台差异和卸载方法见官方 [Getting Started](https://hermes-agent.nousresearch.com/docs/getting-started/)。
-
-### 从源码运行
+需要 Python `>=3.11,<3.14` 和 [uv](https://docs.astral.sh/uv/)。Alpha 阶段尚未提供
+独立安装器，请从源码运行：
 
 ```bash
-git clone https://github.com/ump45nose/hermes-agent.git
-cd hermes-agent
+git clone https://github.com/ump45nose/pony-agent.git
+cd pony-agent
 uv sync --extra all
 
-uv run hermes doctor
-uv run hermes setup
-uv run hermes
+uv run pony --help
+uv run pony setup
+uv run pony -z "Inspect this repository and summarize it"
 ```
 
-`--extra all` 只安装仓库声明的开发/常用 extras；重量级 provider、搜索、语音、消息平台和终端后端仍可能在首次启用时按需安装。
+显式回到 legacy loop：
 
-## 常用命令
+```bash
+uv run pony -z --agent-core legacy "your prompt"
+```
 
-| 命令 | 作用 |
+Pony Kernel 遇到尚未迁移的 Bedrock、ACP 或 Codex App Server 时会明确失败并给出
+上述回退方式，不会静默改变执行核心。
+
+## 名称与数据硬切
+
+Pony 不自动读取或迁移 Hermes 的公开入口：
+
+| 项目 | Pony |
 | --- | --- |
-| `hermes` | 启动经典交互式 CLI |
-| `hermes --tui` | 启动 Ink TUI |
-| `hermes dashboard --host 127.0.0.1 --no-open` | 启动仅监听本机的 Dashboard |
-| `hermes model` | 选择 provider 和模型 |
-| `hermes tools` | 配置 Toolset 与按需能力 |
-| `hermes doctor` | 检查依赖、配置和运行环境 |
-| `hermes setup` | 首次设置或重新配置 |
-| `hermes mcp list` / `test` / `warm` | 查看、探测并预热 MCP 连接 |
-| `hermes gateway setup` / `start` / `status` | 配置、启动和检查消息网关 |
-| `hermes cron list` | 查看定时任务 |
-| `hermes kanban list` | 查看跨 Profile 的持久任务 |
-| `hermes profile list` | 查看可用 Profile |
+| Distribution | `pony-agent` |
+| CLI | `pony`, `pony-agent`, `pony-acp` |
+| 默认目录 | `~/.pony` |
+| 环境变量前缀 | `PONY_*` |
+| Profile | `~/.pony/profiles/<name>/` |
+| Kernel 会话库 | `~/.pony/kernel.db` |
+| Legacy 会话库 | `~/.pony/state.db` |
+| 插件 entry point | `pony_agent.plugins` |
 
-每个子命令都支持 `hermes <command> --help`。`mcp test` 或健康检查只证明连接可用；验收外部服务时还要真实调用目标工具并确认客户端收到结果。
+标准 provider 变量，例如 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`，不因项目改名而
+变化。旧 `hermes` 命令、`HERMES_*` 和 `~/.hermes` 不提供别名或自动迁移。
 
-## Docker 部署
+## Kernel API
 
-仓库自带 `docker-compose.yml`，适合在服务器上运行 Gateway 和本地 Dashboard：
+```python
+from pony_agent.core import AgentKernel, KernelConfig
 
-```bash
-HERMES_UID="$(id -u)" HERMES_GID="$(id -g)" docker compose build
-HERMES_UID="$(id -u)" HERMES_GID="$(id -g)" docker compose up -d
-docker compose ps
+session = kernel.open_session(KernelConfig(model="provider/model"))
+await session.submit("hello")
+
+async for event in session.events():
+    if event.kind == "text.delta":
+        render(event.payload["delta"])
+    if event.kind in {"run.completed", "run.failed"}:
+        break
 ```
 
-Compose 将宿主机 `~/.hermes` 映射到容器 `/opt/data`，并以宿主 UID/GID 创建文件。Gateway 使用 host network；Dashboard 默认只绑定 `127.0.0.1`。远程访问请使用 SSH 隧道（例如 `ssh -L 9119:127.0.0.1:9119 user@host`）或带认证的反向代理，**不要**用 `--insecure --host 0.0.0.0` 暴露 Dashboard。
+公开控制面包括 `submit`、`steer`、`follow_up`、`cancel` 和异步事件流。工具执行
+结果分为 model content、UI details、receipt 和 effect，kernel 不解释具体工具
+语义，也不会自动重放可能产生副作用的工具。
 
-如果要启用 OpenAI-compatible API server，必须同时配置 `API_SERVER_HOST` 和 `API_SERVER_KEY`，并先阅读 [API Server 文档](website/docs/user-guide/api-server.md)。不要覆盖镜像默认的 `/init` entrypoint；它负责权限、Profile reconcile 和服务监督。
+## 当前协议范围
 
-## Profile、配置与密钥
+| Provider wire protocol | Pony Kernel |
+| --- | --- |
+| OpenAI Chat Completions | 已接入 |
+| OpenAI Responses / Codex Responses | 已接入 |
+| Anthropic Messages | 已接入 |
+| Native Gemini | 已接入 |
+| Bedrock Converse | legacy only |
+| ACP / Codex App Server | legacy only |
 
-| 内容 | 默认位置 | 说明 |
-| --- | --- | --- |
-| 行为配置 | `~/.hermes/config.yaml` | 模型、Toolset、Gateway、Cron、Profile 等非秘密设置 |
-| Secret scope | `~/.hermes/.env` | API key、token、密码；不要存普通开关或路径 |
-| 日志 | `~/.hermes/logs/` | `agent.log`、`errors.log`、`gateway.log` |
-| Profile 状态 | `~/.hermes/profiles/<name>/` | 独立配置、会话、记忆、Skill、OAuth 和 Gateway 状态 |
+“已接入”表示 adapter 和事件契约已实现；某个 provider 是否端到端可用仍取决于
+本机是否配置了有效凭据，并应通过一次真实文本流和一次真实 tool call 验证。
 
-```bash
-hermes profile list
-hermes -p lingjun doctor
-hermes -p lingjun gateway status
-hermes logs --follow
-```
+## 安全边界
 
-Profile 名称不是权限本身。实际边界由 toolset、Secret scope、审批策略、MCP allowlist 和运行身份共同决定。不要在 shell 中全局 `source` 某个 Profile 的 `.env`。
+- Pony Kernel 不取代工具 ACL、审批、secret scope 或 Profile 隔离。
+- Provider opaque state 可以写入 `kernel.db`，API key、token、password、cookie 和
+  Authorization 值会在事件入库前按键脱敏。
+- 工具 side effect、receipt 和结果状态由现有 ToolRuntime 维护。
+- `kernel.db` 使用 WAL；事件追加和查询投影在同一事务内提交。
+- Gateway、Kanban、Episode 与平台 delivery 仍位于 kernel 之外。
 
-## Tool、Skill、插件与 MCP
+## 开发验证
 
-Hermes 遵循“核心保持窄、能力放在边缘”的设计：
+本项目只要求与改动直接相关的编译、导入和单路径业务冒烟；不要默认运行大范围
+回归套件。Kernel 改动至少验证：
 
-1. 先看现有 Tool 或命令能否解决问题；
-2. 可复用的流程写成 Skill；
-3. 第三方或特定领域能力放到插件；
-4. 需要结构化外部服务时使用 MCP；
-5. 只有真正基础且无法由终端、文件或 MCP 完成的能力才进入核心工具。
+1. provider 文本流到 `text.delta`；
+2. 一次 tool call 到 receipt/effect 持久化；
+3. cancel 产生 partial checkpoint；
+4. 关闭后可以从 `kernel.db` 重建消息；
+5. 未支持协议给出 `--agent-core legacy` 提示。
 
-MCP 的最小流程如下（具体 URL 和授权方式由服务端决定）：
+## 上游归属
 
-```bash
-hermes mcp add <name> --url <https://example.invalid/mcp>
-hermes mcp test <name>
-hermes mcp warm <name>
-```
-
-Skill 和 Toolset 的切换通常在下一个会话生效，以保护长对话的 prompt cache；需要立即失效时使用命令提供的显式 `--now` 选项。
-
-## 记忆、自动化与协作
-
-- **Memory：** 当前对话可形成脱敏 Episode；检索只召回少量相关内容，稳定经验写入 Profile-local `MEMORY.md`/`USER.md` 前可由 owner 审核。
-- **Cron：** 适合日报、备份、巡检和定时研究。用 `hermes cron list`、`hermes cron add --help` 管理。
-- **Kanban：** 适合跨 Profile 的 claim、租约、子任务、附件和终态交付。用 `hermes kanban --help` 查看完整命令。
-- **Gateway：** 调度成功、工具执行成功、任务完成和消息送达是四个不同状态，排障时要分别核对。
-
-## 安全基线
-
-- 行为设置放 `config.yaml`；`.env` 只放 API key、token、密码等 secret。
-- Dashboard 默认只监听本机；API server 对外开放时必须配置 key 并放在认证反代之后。
-- 默认拒绝私有 URL、启用 secret redaction 和命令安全检查；发送文件时会拒绝 `/etc`、`/proc`、`~/.ssh`、`~/.aws`、`~/.hermes/.env`、`auth.json` 等敏感路径。
-- 为不同身份使用不同 Profile；不要用“同一个 OS 用户能读到文件”代替 Profile ACL。
-- 不要把 API key 复制到命令参数、日志、Prompt、Memory、Cron 定义、Issue 或提交信息。
-
-## 开发与验证
-
-```bash
-uv sync --extra all
-uv run hermes --help
-uv run hermes doctor
-```
-
-修改核心代码时，先做与改动直接相关的静态、导入/编译或单路径 smoke 验证。需要运行测试时，使用仓库提供的 `scripts/run_tests.sh`，并尽量限定到目标文件或目录：
-
-```bash
-scripts/run_tests.sh tests/<target>.py -k <case>
-```
-
-核心代码按职责分层：`run_agent.py` / `model_tools.py` 负责 Agent loop 和工具编排；`agent/` 负责上下文与 provider；`gateway/` 负责消息平台；`hermes_cli/` 负责 CLI、Profile、Cron、Kanban 和 Dashboard；`tools/`、`plugins/`、`skills/` 负责扩展；`ui-tui/` 和 `apps/desktop/` 负责交互界面。
-
-## 排障入口
-
-1. 先运行 `hermes doctor`，确认实际使用的 Profile、Python 和 provider；
-2. 查看 `hermes logs --follow`，区分配置未加载、凭据缺失、工具不可见和工具执行失败；
-3. MCP 连接先 `hermes mcp test`，再真实调用目标工具；
-4. Gateway 需要分别确认进程、会话、工具结果和消息送达；
-5. Dashboard 远程访问优先检查 SSH 隧道或反代认证，不要直接改成公网无认证监听。
-
-## 相关链接
-
-- [官方文档](https://hermes-agent.nousresearch.com/docs/)
-- [本地定制仓库](https://github.com/ump45nose/hermes-agent)
-- [上游 Issue](https://github.com/NousResearch/hermes-agent/issues)
-- [本地 Issue](https://github.com/ump45nose/hermes-agent/issues)
-- [贡献指南](CONTRIBUTING.md)
-
-## 许可证
-
-本项目按 [MIT License](LICENSE) 发布。
+Pony 保留 Hermes Agent 的完整 Git ancestry、发布 tags、MIT License 和原作者
+版权。Legacy 模块在迁移期间仍保留原有 Hermes 内部命名；这不表示存在公开的
+Hermes 命令或数据兼容层。

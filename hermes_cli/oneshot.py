@@ -16,7 +16,7 @@ Model / provider selection mirrors `hermes chat`:
     - If only --provider given, error out (ambiguous — caller must pick a model).
 
 Env var fallbacks (used when the corresponding arg is not passed):
-    - HERMES_INFERENCE_MODEL
+    - PONY_INFERENCE_MODEL
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ def _validate_explicit_toolsets(toolsets: object = None) -> tuple[list[str] | No
     try:
         from toolsets import validate_toolset
     except Exception as exc:
-        return None, f"hermes -z: failed to validate --toolsets: {exc}\n"
+        return None, f"pony -z: failed to validate --toolsets: {exc}\n"
 
     built_in = [name for name in normalized if validate_toolset(name)]
     unresolved = [name for name in normalized if name not in built_in]
@@ -80,7 +80,7 @@ def _validate_explicit_toolsets(toolsets: object = None) -> tuple[list[str] | No
         ignored = [name for name in normalized if name not in {"all", "*"}]
         if ignored:
             sys.stderr.write(
-                "hermes -z: --toolsets all enables every toolset; "
+                "pony -z: --toolsets all enables every toolset; "
                 f"ignoring additional entries: {', '.join(ignored)}\n"
             )
         return None, None
@@ -111,15 +111,15 @@ def _validate_explicit_toolsets(toolsets: object = None) -> tuple[list[str] | No
     valid = built_in + mcp_valid
 
     if unknown:
-        sys.stderr.write(f"hermes -z: ignoring unknown --toolsets entries: {', '.join(unknown)}\n")
+        sys.stderr.write(f"pony -z: ignoring unknown --toolsets entries: {', '.join(unknown)}\n")
     if disabled:
         sys.stderr.write(
-            "hermes -z: ignoring disabled MCP servers (set enabled: true in config.yaml to use): "
+            "pony -z: ignoring disabled MCP servers (set enabled: true in config.yaml to use): "
             f"{', '.join(disabled)}\n"
         )
 
     if not valid:
-        return None, "hermes -z: --toolsets did not contain any valid toolsets.\n"
+        return None, "pony -z: --toolsets did not contain any valid toolsets.\n"
 
     return valid, None
 
@@ -226,7 +226,7 @@ def _run_oneshot_scoped(
     env_model_early = os.getenv("HERMES_INFERENCE_MODEL", "").strip()
     if provider and not ((model or "").strip() or env_model_early):
         sys.stderr.write(
-            "hermes -z: --provider requires --model (or HERMES_INFERENCE_MODEL). "
+            "pony -z: --provider requires --model (or PONY_INFERENCE_MODEL). "
             "Pass both explicitly, or neither to use your configured defaults.\n"
         )
         return 2
@@ -263,13 +263,29 @@ def _run_oneshot_scoped(
     try:
         with redirect_stdout(devnull), redirect_stderr(devnull):
             try:
-                response, result = _run_agent(
-                    prompt,
-                    model=model,
-                    provider=provider,
-                    toolsets=explicit_toolsets,
-                    use_config_toolsets=use_config_toolsets,
-                )
+                selected_core = os.getenv("PONY_AGENT_CORE", "pony").strip().lower()
+                if selected_core == "legacy":
+                    response, result = _run_agent(
+                        prompt,
+                        model=model,
+                        provider=provider,
+                        toolsets=explicit_toolsets,
+                        use_config_toolsets=use_config_toolsets,
+                    )
+                elif selected_core == "pony":
+                    from pony_agent.oneshot import run_pony_agent
+
+                    response, result = run_pony_agent(
+                        prompt,
+                        model=model,
+                        provider=provider,
+                        toolsets=explicit_toolsets,
+                        use_config_toolsets=use_config_toolsets,
+                    )
+                else:
+                    raise ValueError(
+                        f"unknown --agent-core value {selected_core!r}; expected pony or legacy"
+                    )
             except BaseException as exc:  # noqa: BLE001
                 # Capture anything that escapes the agent (including OSError
                 # from prompt_toolkit/Vt100 when stdout is a non-TTY pipe,
@@ -292,7 +308,7 @@ def _run_oneshot_scoped(
             _write_usage_file(usage_file, result, failure=repr(failure))
             raise failure
         _write_usage_file(usage_file, result, failure=str(failure))
-        real_stderr.write(f"hermes -z: agent failed: {failure}\n")
+        real_stderr.write(f"pony -z: agent failed: {failure}\n")
         real_stderr.flush()
         return 1
 
@@ -308,7 +324,7 @@ def _run_oneshot_scoped(
         return 2
 
     if not (response or "").strip():
-        real_stderr.write("hermes -z: no final response was produced; treating the run as failed.\n")
+        real_stderr.write("pony -z: no final response was produced; treating the run as failed.\n")
         real_stderr.flush()
         return 1
 
