@@ -1,41 +1,125 @@
 # Pony Agent
 
-Pony Agent 是从 Hermes Agent 演进而来的轻量 Agent Kernel。它保留 Hermes 在
-provider、工具、审批、Profile、消息网关和 MCP 等外围积累的实现，重新建立一个
-小型、可测试、async-first 的消息与工具循环。
+Pony Agent 是一个面向可组合 Agent 的 Python runtime。它把一次 agent 运行压缩为一条
+async-first loop：接收消息、调用模型、按需执行工具、把工具结果继续交给模型，并以
+事件流和持久化会话暴露给 CLI、Gateway 及其他宿主。
 
-当前版本是 `0.1.0a1`。CLI oneshot 已默认使用 Pony Kernel；交互式 CLI、Gateway、
-Bedrock、ACP 和 Codex App Server 仍暂时运行 legacy loop。
+项目的重点不是把所有能力塞进核心，而是用窄接口连接 provider、tool runtime、context
+policy、session store 和事件消费者。这样核心保持小、可测试，外围能力可以独立演进。
+
+> 当前版本：`0.1.0a1`（Alpha）。接口和协议仍在迭代；未接入的 provider 或宿主会显式
+> 报错，不会静默切换到另一条执行路径。
 
 - **仓库：** <https://github.com/ump45nose/pony-agent>
-- **上游项目：** <https://github.com/NousResearch/hermes-agent>
+- **Python：** `>=3.11,<3.14`
 - **许可证：** MIT，见 [LICENSE](LICENSE)
 
-## 为什么是一个新 Kernel？
+## 项目特点
 
-一个基础 agent loop 并不需要框架：接收消息、流式请求模型、执行工具，再把工具
-结果交回模型即可。真正昂贵的是 provider 协议差异、reasoning/signature replay、
-缓存与凭据刷新、工具审批、secret scope、Profile、平台重连和 MCP OAuth。
+### 精简 loop
 
-Pony 因此采用绞杀式迁移：
+Kernel 只负责消息、模型、工具和事件之间的编排：
 
 ```text
-pony -z
-  -> AgentKernel
-       -> ProviderAdapter  -> Chat / Responses / Anthropic / native Gemini
-       -> ToolRuntime      -> existing registry / ACL / approval / receipts
-       -> ContextPolicy    -> one bounded compaction attempt
-       -> SessionStore     -> ~/.pony/kernel.db
-       -> KernelEvent      -> streaming UI / future Gateway adapter
+submit / follow_up / steer
+          │
+          ▼
+     provider stream
+       ├─ text.delta / reasoning.delta
+       ├─ tool.requested
+       │    └─ scoped lookup → execute → receipt / effect
+       └─ run.completed / run.failed
 ```
 
-纯 kernel 位于 `pony_agent/core/`。它不导入 provider SDK、SQLite、Hermes CLI 或
-具体工具；这些能力均通过窄接口注入。
+- `KernelSession` 提供 `submit`、`follow_up`、`steer`、`cancel` 和异步 `events()`；
+- 工具调用可以批量执行，结果同时保留 model content、UI details、receipt 和 effect；
+- 上下文只在需要时进行一次有边界的压缩，避免把上下文策略、provider SDK 或具体工具
+  语义写死在 loop 中；
+- 事件可持久化并在进程重启后重建会话，副作用工具不会被 Kernel 自动重放。
+
+Kernel 的公开 API 通过依赖注入保持窄而稳定：
+
+```python
+from pony_agent.core import AgentKernel, KernelConfig
+
+# provider、tools、store、context 由宿主选择具体实现。
+kernel = AgentKernel(provider=provider, tools=tools, store=store, context=context)
+session = kernel.open_session(KernelConfig(model="provider/model"))
+
+await session.submit("检查这个仓库并给出一句话总结")
+async for event in session.events():
+    if event.kind == "text.delta":
+        render(event.payload["delta"])
+    if event.kind in {"run.completed", "run.failed"}:
+        break
+
+await session.close()
+```
+
+### Kanban：把多 Agent 协作放在 loop 之外
+
+Kanban 是持久化的任务板和共享黑板，不是第二条隐藏的 agent loop。它为协作提供：
+
+- 任务创建、领取、heartbeat、评论、附件、完成和阻塞等明确生命周期；
+- 一个 dispatcher 负责在同一 board 上认领 ready task，避免多个 gateway 重复派发；
+- `root → 并行 specialist workers → verifier → synthesizer` 的 swarm 拓扑；
+- 任务评论和事件作为结构化协作记录，worker 不需要共享完整对话上下文；
+- board 级隔离，以及按 profile/toolset 显式授予的 worker、orchestrator 能力。
+
+因此，单个 Agent 仍然只运行精简 loop；Kanban 负责把多个独立 profile 组织成可观察、
+可恢复的工作流。CLI、dashboard 和 slash 入口都可以接入同一块任务板。
+
+### Multi-profile 下的 Multi-agent
+
+一个 Gateway 可以根据 `platform`、`guild_id`、`chat_id`、`thread_id` 将消息路由到不同
+profile。每个 profile 保持独立的 persona、memory、session 和 tool scope；Kanban 又可
+以把不同任务分配给不同 profile，让 specialist 并行工作，再由 verifier/synthesizer
+汇总结果。
+
+这种设计把“多 Agent”拆成两个可独立控制的边界：
+
+1. **路由边界：** 入站消息只进入匹配到的 profile；
+2. **任务边界：** worker 只看到被分配的 board/task，完成、阻塞和 heartbeat 都写回任务板。
+
+Profile routing 依赖多 profile runtime 开关；关闭时保持单 profile 行为，避免隐式改变
+现有会话的状态空间。详见 [profile routing 文档](docs/profile-routing.md) 与
+[多 Gateway 看板说明](docs/kanban/multi-gateway.md)。
+
+### Tool / Skill 渐进式加载
+
+工具和技能采用渐进式披露，而不是把全部能力永久注入每次模型请求：
+
+- 基础 toolset 先按当前会话、profile 和 allowlist 收敛；可延迟工具在需要时通过 scoped
+  tool search 查找并展开；
+- skill bundle 可以一次显式加载多个技能，技能内容会经过启用状态、路径和缓存校验；
+- 渐进式披露是可配置的运行策略，未启用的工具/技能不会因为“仓库里存在”就自动出现；
+- 工具 schema 与 skill payload 分开处理，既减少 prompt footprint，也保留 ACL、审批和
+  secret scope 的边界。
+
+这让“能力很多”和“每一轮都很重”可以同时成立：常用路径保持短，长尾能力按需出现。
+
+## 架构边界
+
+```text
+pony_agent/core/
+  AgentKernel / KernelSession / KernelEvent
+        │  narrow ports
+        ├─ ProviderAdapter   → Chat / Responses / Anthropic / Gemini 等 wire protocol
+        ├─ ToolRuntime       → registry / ACL / approval / receipts
+        ├─ ContextPolicy     → bounded compaction
+        └─ SessionStore      → event append + session rebuild
+
+agent/、tools/、gateway/、plugins/、skills/
+  能力适配、入口和扩展；不把实现细节反向塞回 core。
+```
+
+Kernel 目前优先用于 oneshot 路径；其他宿主通过适配层接入。Provider adapter 是否能端到
+端运行，仍取决于本机配置的凭据和实际 wire protocol，建议用一次真实文本流和一次真实
+tool call 做验证。
 
 ## 从源码运行
 
-需要 Python `>=3.11,<3.14` 和 [uv](https://docs.astral.sh/uv/)。Alpha 阶段尚未提供
-独立安装器，请从源码运行：
+需要 Python `>=3.11,<3.14` 和 [uv](https://docs.astral.sh/uv/)。Alpha 阶段请直接从源码运行：
 
 ```bash
 git clone https://github.com/ump45nose/pony-agent.git
@@ -47,88 +131,30 @@ uv run pony setup
 uv run pony -z "Inspect this repository and summarize it"
 ```
 
-显式回到 legacy loop：
+oneshot 默认使用 Pony Kernel；需要选择模型或 provider 时，沿用项目的 provider 配置和
+环境变量即可，例如 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`。不要把凭据写入仓库或提交到
+配置文件。
 
-```bash
-uv run pony -z --agent-core legacy "your prompt"
-```
+## 开发与验证
 
-Pony Kernel 遇到尚未迁移的 Bedrock、ACP 或 Codex App Server 时会明确失败并给出
-上述回退方式，不会静默改变执行核心。
+项目遵循“小改动、小验证”的节奏。修改 Kernel、adapter 或工具时，至少覆盖与改动直接
+相关的一条路径：
 
-## 名称与数据硬切
+1. 编译/导入通过；
+2. provider 文本流能产生 `text.delta` 和终止事件；
+3. 一次 tool call 能产生 receipt/effect；
+4. cancel 能产生 partial checkpoint；
+5. 关闭后可以从 session store 重建消息；
+6. 未支持协议能给出明确的错误和下一步提示。
 
-Pony 不自动读取或迁移 Hermes 的公开入口：
+不要默认运行大范围回归套件；需要扩大验证范围时，请在变更说明中写清楚原因。
 
-| 项目 | Pony |
-| --- | --- |
-| Distribution | `pony-agent` |
-| CLI | `pony`, `pony-agent`, `pony-acp` |
-| 默认目录 | `~/.pony` |
-| 环境变量前缀 | `PONY_*` |
-| Profile | `~/.pony/profiles/<name>/` |
-| Kernel 会话库 | `~/.pony/kernel.db` |
-| Legacy 会话库 | `~/.pony/state.db` |
-| 插件 entry point | `pony_agent.plugins` |
+## 文档入口
 
-标准 provider 变量，例如 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`，不因项目改名而
-变化。旧 `hermes` 命令、`HERMES_*` 和 `~/.hermes` 不提供别名或自动迁移。
+- [Profile routing](docs/profile-routing.md)：按平台、服务器、频道和线程隔离 profile；
+- [多 Gateway 看板](docs/kanban/multi-gateway.md)：dispatcher、board ownership 与多入口协作；
+- `docs/`：会话生命周期、provider、Gateway 和扩展设计；
+- [LICENSE](LICENSE)：MIT 许可证。
 
-## Kernel API
-
-```python
-from pony_agent.core import AgentKernel, KernelConfig
-
-session = kernel.open_session(KernelConfig(model="provider/model"))
-await session.submit("hello")
-
-async for event in session.events():
-    if event.kind == "text.delta":
-        render(event.payload["delta"])
-    if event.kind in {"run.completed", "run.failed"}:
-        break
-```
-
-公开控制面包括 `submit`、`steer`、`follow_up`、`cancel` 和异步事件流。工具执行
-结果分为 model content、UI details、receipt 和 effect，kernel 不解释具体工具
-语义，也不会自动重放可能产生副作用的工具。
-
-## 当前协议范围
-
-| Provider wire protocol | Pony Kernel |
-| --- | --- |
-| OpenAI Chat Completions | 已接入 |
-| OpenAI Responses / Codex Responses | 已接入 |
-| Anthropic Messages | 已接入 |
-| Native Gemini | 已接入 |
-| Bedrock Converse | legacy only |
-| ACP / Codex App Server | legacy only |
-
-“已接入”表示 adapter 和事件契约已实现；某个 provider 是否端到端可用仍取决于
-本机是否配置了有效凭据，并应通过一次真实文本流和一次真实 tool call 验证。
-
-## 安全边界
-
-- Pony Kernel 不取代工具 ACL、审批、secret scope 或 Profile 隔离。
-- Provider opaque state 可以写入 `kernel.db`，API key、token、password、cookie 和
-  Authorization 值会在事件入库前按键脱敏。
-- 工具 side effect、receipt 和结果状态由现有 ToolRuntime 维护。
-- `kernel.db` 使用 WAL；事件追加和查询投影在同一事务内提交。
-- Gateway、Kanban、Episode 与平台 delivery 仍位于 kernel 之外。
-
-## 开发验证
-
-本项目只要求与改动直接相关的编译、导入和单路径业务冒烟；不要默认运行大范围
-回归套件。Kernel 改动至少验证：
-
-1. provider 文本流到 `text.delta`；
-2. 一次 tool call 到 receipt/effect 持久化；
-3. cancel 产生 partial checkpoint；
-4. 关闭后可以从 `kernel.db` 重建消息；
-5. 未支持协议给出 `--agent-core legacy` 提示。
-
-## 上游归属
-
-Pony 保留 Hermes Agent 的完整 Git ancestry、发布 tags、MIT License 和原作者
-版权。Legacy 模块在迁移期间仍保留原有 Hermes 内部命名；这不表示存在公开的
-Hermes 命令或数据兼容层。
+欢迎提交 issue、文档修订和小而可验证的改动。请优先保持 core 的边界，让新能力落在
+adapter、tool、skill、plugin 或 Gateway 等合适的外围层。
